@@ -47,5 +47,7 @@ sub users_can_hide { return 1; }
 
 sub default_show_name { 0 }
 
+sub combine_tabs_on_around { return 1; }
+
 1;
 
