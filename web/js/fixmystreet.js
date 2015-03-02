@@ -207,6 +207,25 @@ $(function(){
     // we disable validation by default, and add it in the JS case.
     // For some reason, the removeAttr doesn't work if we place it at beginning.
     $('#mapForm').removeAttr('novalidate');
+
+    // Track
+    $("[data-clicktrack]").on('click', function(e){
+        var url = $(this).attr('href')
+        var name = $(this).attr('data-clicktrack')
+        var callback = function(){
+            window.location.href = url
+        }
+        if(e.metaKey || e.ctrlKey){
+            callback = function(){}
+        } else {
+            e.preventDefault()
+        }
+        ga('send', 'event', 'action', 'click', name, {
+            'hitCallback': callback
+        })
+        setTimeout(callback, 2000);
+    });
+
 });
 
 })(jQuery);
