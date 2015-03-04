@@ -83,7 +83,9 @@ function fms_markers_list(pins, transform) {
             colour: pin[2],
             size: pin[5] || 'normal',
             id: pin[3],
-            title: pin[4] || ''
+            title: pin[4] || '',
+            category: pin[6],
+            fixed: pin[7]
         });
         markers.push( marker );
     }
