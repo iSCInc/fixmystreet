@@ -5,7 +5,9 @@ use strict;
 use warnings;
 use DateTime;
 use Test::More;
+use Test::LongString;
 use JSON;
+use Path::Tiny;
 
 # Check that you have the required locale installed - the following
 # should return a line with de_CH.utf8 in. If not install that locale.
@@ -20,6 +22,10 @@ use FixMyStreet;
 my $c = FixMyStreet::App->new();
 my $cobrand = FixMyStreet::Cobrand::Zurich->new({ c => $c });
 $c->stash->{cobrand} = $cobrand;
+
+my $sample_file = path(__FILE__)->parent->parent->child("app/controller/sample.jpg");
+ok $sample_file->exists, "sample file $sample_file exists";
+my $sample_photo = $sample_file->slurp_raw;
 
 # This is a helper method that will send the reports but with the config
 # correctly set - notably SEND_REPORTS_ON_STAGING needs to be true, and
@@ -66,6 +72,7 @@ $division->parent( $zurich->id );
 $division->send_method( 'Zurich' );
 $division->endpoint( 'division@example.org' );
 $division->update;
+$division->body_areas->find_or_create({ area_id => 274456 });
 my $subdivision = $mech->create_body_ok( 3, 'Subdivision A' );
 $subdivision->parent( $division->id );
 $subdivision->send_method( 'Zurich' );
@@ -105,8 +112,50 @@ my @reports = $mech->create_problems_for_body( 1, $division->id, 'Test', {
     state              => 'unconfirmed',
     confirmed          => undef,
     cobrand            => 'zurich',
+    photo         => $sample_photo,
 });
 my $report = $reports[0];
+
+subtest 'email images to external partners' => sub {
+    FixMyStreet::override_config {
+        ALLOWED_COBRANDS => [ 'zurich' ],
+    }, sub {
+        reset_report_state($report);
+        my $photo = path(__FILE__)->parent->child('zurich-logo_portal.x.jpg')->slurp_raw;
+        my $photoset = FixMyStreet::App::Model::PhotoSet->new({
+            c => $c,
+            data_items => [ $photo ],
+        });
+        my $fileid = $photoset->data;
+        $report->update({
+            state => 'closed',
+            photo => $fileid,
+            external_body => $external_body->id,
+        });
+
+        $mech->clear_emails_ok;
+        send_reports_for_zurich();
+
+        my $email = $mech->get_email;
+        # TODO factor out with t/app/helpers/send_email.t
+        my $email_as_string = $email->as_string;
+        ok $email_as_string =~ s{\s+Date:\s+\S.*?$}{}xmsg, "Found and stripped out date";
+        ok $email_as_string =~ s{\s+Message-ID:\s+\S.*?$}{}xmsg, "Found and stripped out message ID (contains epoch)";
+        my ($boundary) = $email_as_string =~ /boundary="([A-Za-z0-9.]*)"/ms;
+        my $changes = $email_as_string =~ s{$boundary}{}g;
+        is $changes, 4, '4 boundaries'; # header + 3 around the 2x parts (text + 1 image)
+
+        my $expected_email_content = path(__FILE__)->parent->child('zurich_attachments.txt')->slurp;
+        is_string $email_as_string, $expected_email_content, 'MIME email text ok'
+            or do {
+                (my $test_name = $0) =~ s{/}{_}g;
+                my $path = path("test-output-$test_name.tmp");
+                $path->spew($email_as_string);
+                diag "Saved output in $path";
+            };
+        };
+};
+
 
 FixMyStreet::override_config {
     ALLOWED_COBRANDS => [ 'zurich' ],
@@ -137,7 +186,6 @@ is $mech->uri->path, '/admin', "am logged in";
 $mech->content_contains( 'report_edit/' . $report->id );
 $mech->content_contains( DateTime->now->strftime("%d.%m.%Y") );
 $mech->content_contains( 'Erfasst' );
-
 
 subtest "changing of categories" => sub {
     # create a few categories (which are actually contacts)
@@ -213,7 +261,6 @@ sub get_moderated_count {
 subtest "report_edit" => sub {
 
     reset_report_state($report);
-
     ok ( ! $report->get_extra_metadata('moderated_overdue'), 'Report currently unmoderated' );
 
     is get_moderated_count(), 0;
@@ -225,11 +272,14 @@ subtest "report_edit" => sub {
         $mech->content_contains( 'Unbest&auml;tigt' ); # Unconfirmed email
         $mech->submit_form_ok( { with_fields => { state => 'confirmed' } } );
         $mech->get_ok( '/report/' . $report->id );
+
+        $report->discard_changes();
+        is $report->state, 'confirmed', 'state has been updated to confirmed';
     };
 
     $mech->content_contains('Aufgenommen');
     $mech->content_contains('Test Test');
-    $mech->content_lacks('photo/' . $report->id . '.jpeg');
+    $mech->content_lacks('photo/' . $report->id . '.1.jpeg');
     $mech->email_count_is(0);
 
     $report->discard_changes;
@@ -314,7 +364,7 @@ FixMyStreet::override_config {
     $mech->get_ok( '/admin/report_edit/' . $report->id );
     $mech->submit_form_ok( { with_fields => { state => 'confirmed', publish_photo => 1 } } );
     $mech->get_ok( '/report/' . $report->id );
-    $mech->content_contains('photo/' . $report->id . '.jpeg');
+    $mech->content_contains('photo/' . $report->id . '.1.jpeg');
 
     # Internal notes
     $mech->get_ok( '/admin/report_edit/' . $report->id );
@@ -465,6 +515,7 @@ $mech->clear_emails_ok;
     state              => 'unconfirmed',
     confirmed          => undef,
     cobrand            => 'zurich',
+    photo         => $sample_photo,
 });
 $report = $reports[0];
 
@@ -499,6 +550,7 @@ $mech->email_count_is(0);
     state              => 'unconfirmed',
     confirmed          => undef,
     cobrand            => 'zurich',
+    photo         => $sample_photo,
 });
 $report = $reports[0];
 
@@ -711,6 +763,41 @@ subtest "hidden report email are only sent when requested" => sub {
     };
 };
 
+subtest "photo must be supplied for categories that require it" => sub {
+    FixMyStreet::App->model('DB::Contact')->find_or_create({
+        body => $division,
+        category => "Graffiti - photo required",
+        email => "graffiti\@example.org",
+        confirmed => 1,
+        deleted => 0,
+        editor => "editor",
+        whenedited => DateTime->now(),
+        note => "note for graffiti",
+        extra => { photo_required => 1 }
+    });
+    FixMyStreet::override_config {
+        MAPIT_TYPES => [ 'O08' ],
+        MAPIT_URL => 'http://global.mapit.mysociety.org/',
+        ALLOWED_COBRANDS => [ 'zurich' ],
+        MAPIT_ID_WHITELIST => [ 274456 ],
+        MAPIT_GENERATION => 2,
+    }, sub {
+        $mech->post_ok( '/report/new', {
+            detail => 'Problem-Bericht',
+            lat => 47.381817,
+            lon => 8.529156,
+            email => 'user@example.org',
+            pc => '',
+            name => '',
+            category => 'Graffiti - photo required',
+            photo => '',
+            submit_problem => 1,
+        });
+        is $mech->res->code, 200, "missing photo shouldn't return anything but 200";
+        $mech->content_contains("Photo is required", 'response should contain photo error message');
+    };
+};
+
 subtest "test stats" => sub {
     FixMyStreet::override_config {
         ALLOWED_COBRANDS => [ 'zurich' ],
@@ -759,3 +846,5 @@ END {
     ok $mech->host("www.fixmystreet.com"), "change host back";
     done_testing();
 }
+
+1;
