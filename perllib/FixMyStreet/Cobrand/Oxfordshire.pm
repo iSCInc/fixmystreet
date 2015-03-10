@@ -49,5 +49,7 @@ sub default_show_name { 0 }
 
 sub combine_tabs_on_around { return 1; }
 
+sub on_map_default_states { return FixMyStreet::DB::Result::Problem->open_states(); }
+
 1;
 
